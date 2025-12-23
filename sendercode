@@ -1,0 +1,120 @@
+#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 mpu;
+
+// ------------ Kalman Filter Class ------------
+class KalmanFilter {
+public:
+  KalmanFilter() {
+    Q_angle = 0.001;
+    Q_bias = 0.003;
+    R_measure = 0.03;
+    angle = 0.0;
+    bias = 0.0;
+    P[0][0] = 0; P[0][1] = 0;
+    P[1][0] = 0; P[1][1] = 0;
+  }
+
+  float update(float newAngle, float newRate, float dt) {
+    float rate = newRate - bias;
+    angle += dt * rate;
+
+    P[0][0] += dt * (dt*P[1][1] - P[0][1] - P[1][0] + Q_angle);
+    P[0][1] -= dt * P[1][1];
+    P[1][0] -= dt * P[1][1];
+    P[1][1] += Q_bias * dt;
+
+    float S = P[0][0] + R_measure;
+    float K[2];
+    K[0] = P[0][0] / S;
+    K[1] = P[1][0] / S;
+
+    float y = newAngle - angle;
+    angle += K[0] * y;
+    bias += K[1] * y;
+
+    float P00_temp = P[0][0];
+    float P01_temp = P[0][1];
+
+    P[0][0] -= K[0] * P00_temp;
+    P[0][1] -= K[0] * P01_temp;
+    P[1][0] -= K[1] * P00_temp;
+    P[1][1] -= K[1] * P01_temp;
+
+    return angle;
+  }
+
+  float getAngle() {
+    return angle;
+  }
+
+private:
+  float Q_angle, Q_bias, R_measure;
+  float angle, bias;
+  float P[2][2];
+};
+
+// ------------ Kalman Filters ------------
+KalmanFilter kalmanX, kalmanY;
+
+unsigned long lastTime;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(); // SDA = 21, SCL = 22 (ESP32 default)
+
+  Serial.println("Initializing MPU6050...");
+  mpu.initialize();
+
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed!");
+    while (1);
+  } else {
+    Serial.println("MPU6050 connection successful.");
+  }
+
+  delay(1000); // Let sensor stabilize
+
+  // Read initial values to set Kalman filters
+  int16_t ax, ay, az;
+  mpu.getAcceleration(&ax, &ay, &az);
+  float acc_angle_x = atan2(ay, az) * 180 / PI;
+  float acc_angle_y = atan2(-ax, az) * 180 / PI;
+
+  kalmanX.update(acc_angle_x, 0, 0.01);
+  kalmanY.update(acc_angle_y, 0, 0.01);
+
+  lastTime = millis();
+}
+
+void loop() {
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0;
+  lastTime = now;
+
+  // Convert accelerometer to angle
+  float acc_angle_x = atan2(ay, az) * 180 / PI;
+  float acc_angle_y = atan2(-ax, az) * 180 / PI;
+
+  // Convert gyro to deg/s
+  float gyro_x = gx / 131.0;
+  float gyro_y = gy / 131.0;
+
+  // Update Kalman filters
+  float angle_x = kalmanX.update(acc_angle_x, gyro_x, dt);
+  float angle_y = kalmanY.update(acc_angle_y, gyro_y, dt);
+
+  // Print results
+  Serial.print("Kalman Angles -> X: ");
+  Serial.print(angle_x, 2);
+  Serial.print("°, Y: ");
+  Serial.print(angle_y, 2);
+  Serial.println("°");
+
+  delay(50);
+}
